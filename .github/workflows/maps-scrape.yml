@@ -1,0 +1,71 @@
+# GitHub Actions workflow — live Google Maps scrape (stage 1 of the pipeline)
+#
+# HOW TO USE
+# 1. Fork (or copy) google-maps-scraper-kit into your own GitHub repo.
+# 2. Add this file as .github/workflows/maps-scrape.yml in that repo.
+# 3. GitHub web -> Actions tab -> "maps-scrape" -> Run workflow.
+#    Fill: keywords (one per line), city, depth, socials.
+# 4. When done, download the CSV from the run's Artifacts section,
+#    then continue locally: python3 filter_prospects.py <csv> --out prospects.csv
+#
+# NOTES
+# - Runners already have Docker; no setup needed.
+# - Keep scrapes SMALL: depth 5-8, a handful of keywords per run.
+#   Actions runners use shared datacenter IPs; Google rate-limits
+#   aggressively. One job at a time. If jobs return failed/empty,
+#   the IP is throttled — wait it out, don't hammer retries.
+# - Free tier: 2,000 Actions minutes/month. A depth-6 batch of ~5
+#   keywords typically finishes well within one run's budget.
+
+name: maps-scrape
+
+on:
+  workflow_dispatch:
+    inputs:
+      keywords:
+        description: 'Keywords, one per line — e.g. "barbershops in Austin TX"'
+        required: true
+        type: string
+      city:
+        description: 'City for auto-geocoding — e.g. "Austin, TX"'
+        required: true
+        type: string
+      depth:
+        description: 'Depth per keyword (start 5-8)'
+        required: false
+        default: '6'
+      socials:
+        description: 'Enrich Instagram/Facebook/LinkedIn'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start scraper engine
+        run: |
+          docker compose up -d
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/api/v1/jobs >/dev/null 2>&1 && break
+            sleep 10
+          done
+          curl -sf http://localhost:8080/api/v1/jobs >/dev/null
+
+      - name: Run scrape
+        run: |
+          printf '%s\n' "${{ inputs.keywords }}" > /tmp/keywords.txt
+          ARGS=(--keywords-file /tmp/keywords.txt --city "${{ inputs.city }}" --depth "${{ inputs.depth }}")
+          if [ "${{ inputs.socials }}" = "true" ]; then ARGS+=(--socials); fi
+          python3 scripts/scrape.py "${ARGS[@]}" --out /tmp/results.csv
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-results
+          path: /tmp/results.csv
+          retention-days: 7
